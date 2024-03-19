@@ -203,6 +203,64 @@ static bool maybe_handle_vm86_trap(CPUX86State *env, int trapnr)
     return false;
 }
 
+#include <dlfcn.h>
+
+static bool maybe_magic_call(CPUArchState *cpu_env, int num, abi_long arg1,
+                    abi_long arg2, abi_long arg3, abi_long arg4,
+                    abi_long arg5, abi_long arg6, abi_long arg7,
+                    abi_long arg8, uint64_t *ret)
+{
+    enum MagicCallType {
+        LoadLibrary,
+        FreeLibrary,
+        GetProcAddress,
+        GetErrorMessage,
+        CallNativeProc,
+
+        UserCall = 0x1000,
+    };
+
+    if (num == 114514) {
+        void **a = (void **) arg2;
+        switch (arg1) {
+        case LoadLibrary: {
+            const char *path = a[0];
+            int flags = *(int *) a[1];
+            *ret = (uint64_t) dlopen(path, flags);
+            break;
+        }
+        case FreeLibrary: {
+            void *handle = a[0];
+            *ret = (uint64_t) dlclose(handle);
+            break;
+        }
+        case GetProcAddress: {
+            void *handle = a[0];
+            const char *name = a[1];
+            *ret = (uint64_t) dlsym(handle, name);
+            break;
+        }
+        case GetErrorMessage: {
+            *ret = (uint64_t) dlerror();
+            break;
+        }
+        case CallNativeProc: {
+            typedef void (*Func)(void *, void *);
+            Func func = a[0];
+            void *args = a[1];
+            void *ret2 = a[2];
+            func(args, ret2);
+            *ret = 0;
+            break;
+        }
+        default:
+            break;
+        }
+        return true;
+    }
+    return false;
+}
+
 void cpu_loop(CPUX86State *env)
 {
     CPUState *cs = env_cpu(env);
@@ -220,6 +278,18 @@ void cpu_loop(CPUX86State *env)
 #ifndef TARGET_X86_64
         case EXCP_SYSCALL:
 #endif
+            if (maybe_magic_call(env,
+                             env->regs[R_EAX],
+                             env->regs[R_EBX],
+                             env->regs[R_ECX],
+                             env->regs[R_EDX],
+                             env->regs[R_ESI],
+                             env->regs[R_EDI],
+                             env->regs[R_EBP],
+                             0, 0, &ret)) {
+                env->regs[R_EAX] = ret;
+                break;
+            }
             /* linux syscall from int $0x80 */
             ret = do_syscall(env,
                              env->regs[R_EAX],
@@ -238,6 +308,18 @@ void cpu_loop(CPUX86State *env)
             break;
 #ifdef TARGET_X86_64
         case EXCP_SYSCALL:
+            if (maybe_magic_call(env,
+                            env->regs[R_EAX],
+                            env->regs[R_EDI],
+                            env->regs[R_ESI],
+                            env->regs[R_EDX],
+                            env->regs[10],
+                            env->regs[8],
+                            env->regs[9],
+                            0, 0, &ret)) {
+                env->regs[R_EAX] = ret;
+                break;
+            }
             /* linux syscall from syscall instruction.  */
             ret = do_syscall(env,
                              env->regs[R_EAX],
