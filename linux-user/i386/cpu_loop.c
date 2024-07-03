@@ -205,20 +205,22 @@ static bool maybe_handle_vm86_trap(CPUX86State *env, int trapnr)
 
 #include <dlfcn.h>
 
+enum MagicCallType {
+    LoadLibrary = 0x1,
+    FreeLibrary,
+    GetProcAddress,
+    GetErrorMessage,
+    CallNativeProc,
+    NextCallFinished,
+
+    UserCall = 0x1000,
+};
+
 static bool maybe_magic_call(CPUArchState *cpu_env, int num, abi_long arg1,
                     abi_long arg2, abi_long arg3, abi_long arg4,
                     abi_long arg5, abi_long arg6, abi_long arg7,
                     abi_long arg8, uint64_t *ret)
 {
-    enum MagicCallType {
-        LoadLibrary,
-        FreeLibrary,
-        GetProcAddress,
-        GetErrorMessage,
-        CallNativeProc,
-
-        UserCall = 0x1000,
-    };
 
     if (num == 114514) {
         void **a = (void **) arg2;
@@ -253,12 +255,177 @@ static bool maybe_magic_call(CPUArchState *cpu_env, int num, abi_long arg1,
             *ret = 0;
             break;
         }
+        case NextCallFinished: {
+            break;
+        }
         default:
             break;
         }
         return true;
     }
     return false;
+}
+
+void cpu_loop2(void *callback, int argc, void *argv, void *ret1) {
+    CPUState *cs = thread_cpu;
+    CPUX86State *env = cpu_env(cs);
+    int trapnr;
+    abi_ulong ret;
+
+    env->regs[R_EAX] = 1;
+
+    uintptr_t *next_call = (uintptr_t *) env->regs[R_EDX];
+    next_call[0] = (uintptr_t) callback;
+    next_call[1] = argc;
+    next_call[2] = (uintptr_t) argv;
+    next_call[3] = (uintptr_t) ret1;
+
+    for(;;) {
+        cpu_exec_start(cs);
+        trapnr = cpu_exec(cs);
+        cpu_exec_end(cs);
+        process_queued_cpu_work(cs);
+
+        target_ulong call_type = env->regs[R_EBX];
+
+        switch(trapnr) {
+        case 0x80:
+#ifndef TARGET_X86_64
+        case EXCP_SYSCALL:
+#endif
+            if (maybe_magic_call(env,
+                             env->regs[R_EAX],
+                             env->regs[R_EBX],
+                             env->regs[R_ECX],
+                             env->regs[R_EDX],
+                             env->regs[R_ESI],
+                             env->regs[R_EDI],
+                             env->regs[R_EBP],
+                             0, 0, &ret)) {
+                env->regs[R_EAX] = ret;
+
+                if (call_type == NextCallFinished) {
+                    goto exit1;
+                }
+                break;
+            }
+            /* linux syscall from int $0x80 */
+            ret = do_syscall(env,
+                             env->regs[R_EAX],
+                             env->regs[R_EBX],
+                             env->regs[R_ECX],
+                             env->regs[R_EDX],
+                             env->regs[R_ESI],
+                             env->regs[R_EDI],
+                             env->regs[R_EBP],
+                             0, 0);
+            if (ret == -QEMU_ERESTARTSYS) {
+                env->eip -= 2;
+            } else if (ret != -QEMU_ESIGRETURN) {
+                env->regs[R_EAX] = ret;
+            }
+            break;
+#ifdef TARGET_X86_64
+        case EXCP_SYSCALL:
+            if (maybe_magic_call(env,
+                            env->regs[R_EAX],
+                            env->regs[R_EDI],
+                            env->regs[R_ESI],
+                            env->regs[R_EDX],
+                            env->regs[10],
+                            env->regs[8],
+                            env->regs[9],
+                            0, 0, &ret)) {
+                env->regs[R_EAX] = ret;
+
+                if (call_type == NextCallFinished) {
+                    goto exit1;
+                }
+                break;
+            }
+            /* linux syscall from syscall instruction.  */
+            ret = do_syscall(env,
+                             env->regs[R_EAX],
+                             env->regs[R_EDI],
+                             env->regs[R_ESI],
+                             env->regs[R_EDX],
+                             env->regs[10],
+                             env->regs[8],
+                             env->regs[9],
+                             0, 0);
+            if (ret == -QEMU_ERESTARTSYS) {
+                env->eip -= 2;
+            } else if (ret != -QEMU_ESIGRETURN) {
+                env->regs[R_EAX] = ret;
+            }
+            break;
+        case EXCP_VSYSCALL:
+            emulate_vsyscall(env);
+            break;
+#endif
+        case EXCP0B_NOSEG:
+        case EXCP0C_STACK:
+            force_sig(TARGET_SIGBUS);
+            break;
+        case EXCP0D_GPF:
+            /* XXX: potential problem if ABI32 */
+            if (maybe_handle_vm86_trap(env, trapnr)) {
+                break;
+            }
+            force_sig(TARGET_SIGSEGV);
+            break;
+        case EXCP0E_PAGE:
+            force_sig_fault(TARGET_SIGSEGV,
+                            (env->error_code & PG_ERROR_P_MASK ?
+                             TARGET_SEGV_ACCERR : TARGET_SEGV_MAPERR),
+                            env->cr[2]);
+            break;
+        case EXCP00_DIVZ:
+            if (maybe_handle_vm86_trap(env, trapnr)) {
+                break;
+            }
+            force_sig_fault(TARGET_SIGFPE, TARGET_FPE_INTDIV, env->eip);
+            break;
+        case EXCP01_DB:
+            if (maybe_handle_vm86_trap(env, trapnr)) {
+                break;
+            }
+            force_sig_fault(TARGET_SIGTRAP, TARGET_TRAP_BRKPT, env->eip);
+            break;
+        case EXCP03_INT3:
+            if (maybe_handle_vm86_trap(env, trapnr)) {
+                break;
+            }
+            force_sig(TARGET_SIGTRAP);
+            break;
+        case EXCP04_INTO:
+        case EXCP05_BOUND:
+            if (maybe_handle_vm86_trap(env, trapnr)) {
+                break;
+            }
+            force_sig(TARGET_SIGSEGV);
+            break;
+        case EXCP06_ILLOP:
+            force_sig_fault(TARGET_SIGILL, TARGET_ILL_ILLOPN, env->eip);
+            break;
+        case EXCP_INTERRUPT:
+            /* just indicate that signals should be handled asap */
+            break;
+        case EXCP_DEBUG:
+            force_sig_fault(TARGET_SIGTRAP, TARGET_TRAP_BRKPT, env->eip);
+            break;
+        case EXCP_ATOMIC:
+            cpu_exec_step_atomic(cs);
+            break;
+        default:
+            EXCP_DUMP(env, "qemu: unhandled CPU exception 0x%x - aborting\n",
+                      trapnr);
+            abort();
+        }
+        process_pending_signals(env);
+    }
+
+exit1:;
 }
 
 void cpu_loop(CPUX86State *env)
