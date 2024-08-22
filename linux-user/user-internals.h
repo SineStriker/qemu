@@ -75,6 +75,8 @@ void fork_end(int child);
 
 __attribute__((visibility("default"))) void cpu_loop2(void *callback, int argc, void *argv, void *ret1);
 
+__attribute__((visibility("default"))) uint64_t *get_native_clock(void);
+
 /**
  * probe_guest_base:
  * @image_name: the executable being loaded

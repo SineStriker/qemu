@@ -43,4 +43,5 @@
   qemu_plugin_uninstall;
   qemu_plugin_vcpu_for_each;
   cpu_loop2;
+  get_native_clock;
 };

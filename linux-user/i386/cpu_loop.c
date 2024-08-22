@@ -25,6 +25,8 @@
 #include "signal-common.h"
 #include "user-mmap.h"
 
+#include <sys/syscall.h>
+
 /***********************************************************/
 /* CPUX86 core interface */
 
@@ -216,6 +218,22 @@ enum MagicCallType {
     UserCall = 0x1000,
 };
 
+static uint64_t g_total_cycles = 0;
+
+static uint64_t g_native_clock;
+
+static inline uint64_t rdtsc(void) {
+    uint32_t low, high;
+    __asm__ volatile("rdtsc" : "=a"(low), "=d"(high));
+    return (uint64_t) high << 32 | low;
+}
+
+static void _exit2(void) {
+    double time1 = ((double) g_total_cycles) / 2.9e9 * 1000;
+    fprintf(stderr, "Native total time: %.3f\n", time1);
+    fprintf(stderr, "Native call times: %lu\n", g_native_clock);
+}
+
 static bool maybe_magic_call(CPUArchState *cpu_env, int num, abi_long arg1,
                     abi_long arg2, abi_long arg3, abi_long arg4,
                     abi_long arg5, abi_long arg6, abi_long arg7,
@@ -251,7 +269,12 @@ static bool maybe_magic_call(CPUArchState *cpu_env, int num, abi_long arg1,
             Func func = a[0];
             void *args = a[1];
             void *ret2 = a[2];
+            
+            uint64_t start_time = rdtsc();
             func(args, ret2);
+            uint64_t end_time = rdtsc();
+            g_total_cycles += end_time - start_time;
+
             *ret = 0;
             break;
         }
@@ -261,6 +284,9 @@ static bool maybe_magic_call(CPUArchState *cpu_env, int num, abi_long arg1,
         default:
             break;
         }
+        return true;
+    } else if (num == 114515) {
+        _exit2();
         return true;
     }
     return false;
@@ -428,6 +454,10 @@ void cpu_loop2(void *callback, int argc, void *argv, void *ret1) {
 exit1:;
 }
 
+uint64_t *get_native_clock(void) {
+    return &g_native_clock;
+}
+
 void cpu_loop(CPUX86State *env)
 {
     CPUState *cs = env_cpu(env);
@@ -457,6 +487,7 @@ void cpu_loop(CPUX86State *env)
                 env->regs[R_EAX] = ret;
                 break;
             }
+
             /* linux syscall from int $0x80 */
             ret = do_syscall(env,
                              env->regs[R_EAX],
@@ -487,6 +518,7 @@ void cpu_loop(CPUX86State *env)
                 env->regs[R_EAX] = ret;
                 break;
             }
+
             /* linux syscall from syscall instruction.  */
             ret = do_syscall(env,
                              env->regs[R_EAX],
