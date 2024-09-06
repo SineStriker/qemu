@@ -220,18 +220,14 @@ enum MagicCallType {
 
 static uint64_t g_total_cycles = 0;
 
-static uint64_t g_native_clock;
-
 static inline uint64_t rdtsc(void) {
     uint32_t low, high;
     __asm__ volatile("rdtsc" : "=a"(low), "=d"(high));
     return (uint64_t) high << 32 | low;
 }
 
-static void _exit2(void) {
-    double time1 = ((double) g_total_cycles) / 2.9e9 * 1000;
-    fprintf(stderr, "Native total time: %.3f\n", time1);
-    fprintf(stderr, "Native call times: %lu\n", g_native_clock);
+void exit2(void) {
+    fprintf(stderr, "Native total cycles: %ld\n", g_total_cycles);
 }
 
 static bool maybe_magic_call(CPUArchState *cpu_env, int num, abi_long arg1,
@@ -284,9 +280,6 @@ static bool maybe_magic_call(CPUArchState *cpu_env, int num, abi_long arg1,
         default:
             break;
         }
-        return true;
-    } else if (num == 114515) {
-        _exit2();
         return true;
     }
     return false;
@@ -452,10 +445,6 @@ void cpu_loop2(void *callback, int argc, void *argv, void *ret1) {
     }
 
 exit1:;
-}
-
-uint64_t *get_native_clock(void) {
-    return &g_native_clock;
 }
 
 void cpu_loop(CPUX86State *env)

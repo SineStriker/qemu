@@ -75,8 +75,6 @@ void fork_end(int child);
 
 __attribute__((visibility("default"))) void cpu_loop2(void *callback, int argc, void *argv, void *ret1);
 
-__attribute__((visibility("default"))) uint64_t *get_native_clock(void);
-
 /**
  * probe_guest_base:
  * @image_name: the executable being loaded
@@ -179,6 +177,8 @@ static inline int regpairs_aligned(CPUArchState *cpu_env, int num) { return 0; }
  * code: the exit code
  */
 void preexit_cleanup(CPUArchState *env, int code);
+
+void exit2(void);
 
 /*
  * Include target-specific struct and function definitions;
